@@ -1,0 +1,78 @@
+name: CI - Security Scanning
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # Allow manual triggers
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [frontend, product_service, order_service]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub (for Scout)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Determine build context
+        id: context
+        run: |
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            echo "path=./frontend" >> $GITHUB_OUTPUT
+          else
+            echo "path=./backend/${{ matrix.service }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.context.outputs.path }}
+          tags: ${{ matrix.service }}:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Docker Scout CVE scan
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ matrix.service }}:${{ github.sha }}
+          only-severities: critical,high
+          exit-code: true
+          sarif-file: sarif-${{ matrix.service }}.output.json
+          
+      - name: Upload SARIF results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sarif-${{ matrix.service }}.output.json
+          category: docker-scout-${{ matrix.service }}
+          
+      - name: Docker Scout recommendations
+        if: always()
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: ${{ matrix.service }}:${{ github.sha }}
+          
+      - name: Docker Scout compare to production
+        if: github.event_name == 'pull_request'
+        uses: docker/scout-action@v1
+        with:
+          command: compare
+          image: ${{ matrix.service }}:${{ github.sha }}
+          to: shenweek08acr.azurecr.io/${{ matrix.service }}:latest
+          exit-code: false
